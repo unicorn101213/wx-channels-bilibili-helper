@@ -1,0 +1,43 @@
+{
+    "manifest_version": 3,
+    "name": "视频号 · B站下载助手（免激活稳定版）",
+    "version": "1.2.1",
+    "description": "专注微信视频号（ISAAC-64解密回传MP4）与B站（直链提取），0弹窗免验证稳定运行",
+    "author": "Learning Edition",
+    "permissions": [
+        "tabs",
+        "storage",
+        "scripting",
+        "downloads"
+    ],
+    "host_permissions": ["<all_urls>"],
+    "action": {
+        "default_popup": "./popup/popup.html",
+        "default_title": "视频号 · B站下载助手（免激活稳定版）",
+        "default_icon": "./imgs/icon64.png"
+    },
+    "icons": {
+        "16": "./imgs/icon16.png",
+        "32": "./imgs/icon32.png",
+        "48": "./imgs/icon48.png",
+        "64": "./imgs/icon64.png",
+        "128": "./imgs/icon128.png"
+    },
+    "background": {
+        "service_worker": "./background.js"
+    },
+    "web_accessible_resources": [
+        {
+            "resources": ["ajaxhook.min.js", "hook.js"],
+            "matches": ["<all_urls>"]
+        }
+    ],
+    "content_scripts": [
+        {
+            "matches": ["<all_urls>"],
+            "js": ["./content/decrypt.js", "./content/content.js"],
+            "run_at": "document_start",
+            "all_frames": true
+        }
+    ]
+}
