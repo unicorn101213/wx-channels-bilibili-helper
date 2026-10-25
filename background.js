@@ -385,13 +385,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           message: "已启动解密并回传 MP4 文件"
         });
 
-        if (photo && settings.saveToLocalDisk) {
-          chrome.downloads.download({
-            url: photo,
-            filename: `${sanitizeFilename(title) || "封面"}.png`,
-            saveAs: false
-          });
-        }
+        // 不再额外下载封面图，避免单次触发两个文件下载导致浏览器弹出“允许下载多个文件”确认框
       } catch (error) {
         console.warn("⚠️ 解析请求失败:", error);
         await saveRecentVideo({

@@ -471,19 +471,28 @@ async function handleDownload(responseData, sendResponse, saveToLocalDisk = fals
 const WECHAT_UPLOAD_LIMIT = 20 * 1024 * 1024;
 
 async function sendMp4BackOrHint(bytes, filename, saveToLocalDisk, alreadyPlain) {
+    const sizeMb = (bytes.byteLength / 1024 / 1024).toFixed(1);
+
+    // 超过 20MB 时网页版微信无法回传，内存里已经解密完毕，直接触发浏览器单文件保存（不下封面，0弹窗）
+    if (bytes.byteLength > WECHAT_UPLOAD_LIMIT) {
+        downloadFile(bytes, filename);
+        await sendMessageToWeChat(`✅ 已解密 ${sizeMb} MB（超过网页微信 20MB 回传上限），已直接在浏览器为您保存 MP4：${filename}`);
+        return true;
+    }
+
     if (saveToLocalDisk) {
         downloadFile(bytes, filename);
     }
 
-    const sizeMb = (bytes.byteLength / 1024 / 1024).toFixed(1);
-    if (bytes.byteLength > WECHAT_UPLOAD_LIMIT) {
-        await sendMessageToWeChat(`这个视频有 ${sizeMb} MB，超过网页版文件传输助手大约 20MB 的限制，没有发回对话框。请点浏览器右上角插件里这条记录的「解密下载」，直接保存到电脑。`);
-        return false;
-    }
-
     const lead = alreadyPlain ? `视频有 ${sizeMb} MB` : `已解密 ${sizeMb} MB`;
     await sendMessageToWeChat(`${lead}，正在把 mp4 发回对话框。`);
-    return sendFileToWeChat(bytes, filename, 'video/mp4');
+    const uploaded = await sendFileToWeChat(bytes, filename, 'video/mp4');
+    if (!uploaded && !saveToLocalDisk) {
+        downloadFile(bytes, filename);
+        await sendMessageToWeChat(`✅ 已解密 ${sizeMb} MB，网页回传受阻，已直接在浏览器为您保存 MP4：${filename}`);
+        return true;
+    }
+    return uploaded;
 }
 
 function sanitizeContentFilename(title) {
