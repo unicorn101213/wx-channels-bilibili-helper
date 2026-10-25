@@ -146,14 +146,14 @@ function extractMsgCardOrVideoInfo(xmlStr) {
 }
 
 /**
- * 从普通文本消息 (MsgType === 1) 中仅识别 B站分享链接（抖音已按要求屏蔽，原样保留不拦截）
+ * 从普通文本消息 (MsgType === 1) 中识别 B站 或 抖音 分享链接
  */
 function extractTextShareLink(text) {
     if (!text || typeof text !== 'string') return null;
 
     const cleanText = text.replace(/<[^>]+>/g, '').trim();
 
-    // 匹配 B站 b23.tv 短链、bilibili.com 链接或纯 BV 号
+    // 1. 匹配 B站 b23.tv 短链、bilibili.com 链接或纯 BV 号
     const b23Match = cleanText.match(/https?:\/\/b23\.tv\/[0-9A-Za-z_-]+/i);
     const biliMatch = cleanText.match(/https?:\/\/(?:www\.|m\.)?bilibili\.com\/video\/(BV[0-9A-Za-z]{10}|av\d+)/i);
     const bvOnlyMatch = cleanText.match(/\b(BV[0-9A-Za-z]{10})\b/);
@@ -167,6 +167,16 @@ function extractTextShareLink(text) {
             bvid,
             shareUrl: b23Match ? b23Match[0] : (biliMatch ? biliMatch[0] : `https://www.bilibili.com/video/${bvid}`),
             description: 'B站视频'
+        };
+    }
+
+    // 2. 匹配抖音分享口令中的短链 (v.douyin.com / www.douyin.com / iesdouyin.com)
+    const dyMatch = cleanText.match(/https?:\/\/(?:v\.douyin\.com\/[0-9A-Za-z_-]+\/?|(?:www\.)?(?:douyin|iesdouyin)\.com\/(?:video|share\/video)\/\d+)/i);
+    if (dyMatch) {
+        return {
+            platform: 'douyin',
+            shareUrl: dyMatch[0],
+            description: cleanText.replace(dyMatch[0], '').trim().slice(0, 60) || '抖音视频'
         };
     }
 
@@ -253,7 +263,8 @@ ah.proxy({
                             msg.Content.includes('✅ 视频已') ||
                             msg.Content.includes('✅ 图集 ZIP') ||
                             msg.Content.includes('⚠️ 自动下载') ||
-                            msg.Content.includes('⚠️ B站')
+                            msg.Content.includes('⚠️ B站') ||
+                            msg.Content.includes('⚠️ 抖音')
                         )) {
                             return;
                         }
@@ -297,16 +308,16 @@ ah.proxy({
                             }
                         }
 
-                        // B. MsgType === 1：普通文本消息（仅识别 B站复制链接，抖音链接原样忽略不处理）
+                        // B. MsgType === 1：普通文本消息（识别 B站 与 抖音 分享链接）
                         if (msg.MsgType === 1 && msg.Content) {
                             const linkInfo = extractTextShareLink(msg.Content);
-                            if (linkInfo && linkInfo.platform === 'bilibili') {
+                            if (linkInfo && (linkInfo.platform === 'bilibili' || linkInfo.platform === 'douyin')) {
                                 processedMsgIds.add(msgId);
-                                console.log(`%c✓ [B站文本分享链接] 提取成功`, 'color: #0070f3; font-weight: bold;', linkInfo);
+                                console.log(`%c✓ [${linkInfo.platform === 'bilibili' ? 'B站' : '抖音'}文本分享链接] 提取成功`, 'color: #0070f3; font-weight: bold;', linkInfo);
 
                                 window.postMessage({
                                     type: 'hook2content_thirdPartyVideo',
-                                    platform: 'bilibili',
+                                    platform: linkInfo.platform,
                                     data: linkInfo
                                 }, '*');
                             }

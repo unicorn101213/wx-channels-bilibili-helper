@@ -1,3 +1,4 @@
+const LOCAL_SERVICE_BASE_URL = "http://127.0.0.1:2022";
 const BACKEND_BASE_URL = "https://vbe5k5l2ij.gzg.sealos.run";
 const BACKEND_JIEXI_API_URL = BACKEND_BASE_URL + "/xbd_ext_cloudDecrypt";
 const BACKEND_FALLBACK_API_URL = BACKEND_BASE_URL + "/xbd_parseVideo";
@@ -39,7 +40,74 @@ async function saveRecentVideo(item) {
   }
 }
 
+async function requestLocalChannelsProfile(requestInit) {
+  let body = {};
+  try {
+    body = typeof requestInit?.body === "string" ? JSON.parse(requestInit.body) : (requestInit?.body || {});
+  } catch (e) {
+    body = {};
+  }
+  const oid = String(body.objectId || "").trim();
+  const nid = String(body.objectNonceId || "").trim();
+  if (!oid || !nid) {
+    return null;
+  }
+
+  const profileUrl = `${LOCAL_SERVICE_BASE_URL}/api/channels/feed/profile?oid=${encodeURIComponent(oid)}&nid=${encodeURIComponent(nid)}`;
+  const res = await fetch(profileUrl, { signal: AbortSignal.timeout(6000) });
+  if (!res.ok) {
+    return null;
+  }
+  const json = await res.json();
+  const obj = json?.data?.data?.object || json?.data?.object;
+  const objectDesc = obj?.objectDesc || obj?.object_desc;
+  const mediaList = Array.isArray(objectDesc?.media) ? objectDesc.media : [];
+  if (!mediaList.length) {
+    return null;
+  }
+
+  const firstMedia = mediaList[0];
+  const fullUrl = String(firstMedia.url || "") + String(firstMedia.urlToken || firstMedia.url_token || "");
+  if (!fullUrl) {
+    return null;
+  }
+  const decodeKey = String(firstMedia.decodeKey || firstMedia.decode_key || "");
+  const isAlbum = objectDesc?.mediaType === 2 && !decodeKey && mediaList.length > 1;
+  const coverUrl = String(firstMedia.coverUrl || firstMedia.cover_url || firstMedia.thumbUrl || "").replace(/^http:\/\//i, "https://");
+  const title = objectDesc?.description || body.description || "视频号视频";
+
+  return {
+    code: 200,
+    msg: "ok (local)",
+    data: {
+      title,
+      type: isAlbum ? 2 : 1,
+      encryption: Boolean(decodeKey),
+      url: decodeKey ? "" : fullUrl,
+      eurl: decodeKey ? fullUrl : "",
+      photo: coverUrl,
+      pics: isAlbum ? mediaList.map((m) => String(m.url || "") + String(m.urlToken || m.url_token || "")) : [],
+      other: {
+        decodeKey,
+        fileSize: firstMedia.fileSize || 0
+      }
+    }
+  };
+}
+
 async function requestParseApi(requestInit, customApiUrl) {
+  // 1. 优先尝试本机电脑微信 4.1.13 直抓服务 (127.0.0.1:2022)，完全不经过外部服务器
+  try {
+    const localRes = await requestLocalChannelsProfile(requestInit);
+    if (localRes && localRes.code === 200 && localRes.data) {
+      console.log("✅ 已通过本机 127.0.0.1:2022 服务直接换取视频号详情");
+      return localRes;
+    }
+  } catch (e) {
+    // 本机服务未连接视频号页面时，平滑回退到云端接口
+  }
+
+  // 2. 兜底云端解析接口
   const candidateUrls = [
     customApiUrl,
     BACKEND_JIEXI_API_URL,
@@ -142,6 +210,76 @@ async function resolveBilibiliVideo({ bvid, aid, shareUrl, title }) {
   };
 }
 
+/**
+ * 通过本机 127.0.0.1:2022 服务无感解析抖音分享链接
+ * 走移动端协议签名，不开任何浏览器标签页、0 滑块验证、0 弹窗，直接返回可点击下载的 MP4 直链
+ */
+async function resolveDouyinVideo({ shareUrl, description, title }) {
+  if (!shareUrl) {
+    throw new Error("未找到抖音分享链接");
+  }
+
+  const startRes = await fetch(
+    `${LOCAL_SERVICE_BASE_URL}/api/scraper/fetch?url=${encodeURIComponent(shareUrl)}`,
+    { signal: AbortSignal.timeout(8000) }
+  );
+  if (!startRes.ok) {
+    throw new Error(`本机服务响应异常 (HTTP ${startRes.status})`);
+  }
+  const startJson = await startRes.json();
+  const jobId = startJson?.data?.id;
+  if (startJson?.code !== 0 || !jobId) {
+    throw new Error(startJson?.msg || "创建抖音解析任务失败");
+  }
+
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    const jobRes = await fetch(
+      `${LOCAL_SERVICE_BASE_URL}/api/scraper/job?id=${encodeURIComponent(jobId)}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!jobRes.ok) continue;
+    const jobJson = await jobRes.json();
+    const jobData = jobJson?.data;
+    if (!jobData) continue;
+
+    if (jobData.status === "failed" || jobData.status === "error") {
+      throw new Error(jobData.error || jobData.progress?.message || "抖音视频解析失败");
+    }
+
+    if (jobData.status === "completed") {
+      const content = jobData.content || {};
+      const detailUrl = jobData.content_details?.[0]?.data?.url || "";
+      const mp4Url = String(content.url || detailUrl || "").replace(/^http:\/\//i, "https://");
+      if (!mp4Url) {
+        throw new Error("未从抖音作品中提取到 MP4 视频地址");
+      }
+      const videoTitle = content.title || content.description || description || title || "抖音视频";
+      const coverUrl = String(content.cover_url || "").replace(/^http:\/\//i, "https://");
+
+      return {
+        code: 200,
+        msg: "ok",
+        data: {
+          platform: "douyin",
+          title: videoTitle,
+          type: 1,
+          encryption: false,
+          url: mp4Url,
+          eurl: "",
+          photo: coverUrl,
+          other: {
+            decodeKey: "",
+            awemeId: content.external_id || ""
+          }
+        }
+      };
+    }
+  }
+
+  throw new Error("解析抖音视频超时");
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "fetch-binary") {
     return;
@@ -223,7 +361,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
-    // 处理 B站 转发消息（直接返回可点击下载的 MP4 直链，不打开新标签页，不占用上传带宽）
+    // 处理 B站 / 抖音 转发消息（直接返回可点击下载的 MP4 直链，不打开新标签页，0 弹窗）
     if (message.action === "content2back_thirdPartyVideo") {
       const settings = await getSettings();
       if (!settings.pluginSwitch) {
@@ -235,16 +373,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      const platform = message.platform === "douyin" ? "douyin" : "bilibili";
+      const platformLabel = platform === "douyin" ? "抖音" : "B站";
       const payload = message.data || {};
 
       try {
-        const apiResponse = await resolveBilibiliVideo(payload);
+        const apiResponse = platform === "douyin"
+          ? await resolveDouyinVideo(payload)
+          : await resolveBilibiliVideo(payload);
         const { title, url, photo } = apiResponse.data;
 
         await saveRecentVideo({
-          platform: "bilibili",
-          objectId: apiResponse.data?.other?.bvid || payload.shareUrl || "",
-          title: `[B站] ${title || "视频"}`,
+          platform,
+          objectId: apiResponse.data?.other?.bvid || apiResponse.data?.other?.awemeId || payload.shareUrl || "",
+          title: `[${platformLabel}] ${title || "视频"}`,
           url,
           photo: photo || "",
           encryption: false,
@@ -252,13 +394,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           type: 1
         });
 
-        // B站直接向微信传输助手发送可直接点击下载的 MP4 直链 + 封面链接
+        // 直接向微信传输助手发送可直接点击下载的 MP4 直链
         if (settings.autoSendChat && sender?.tab?.id) {
           chrome.tabs.sendMessage(parseInt(sender.tab.id, 10), {
             action: "back2content_postVideoInfo",
             data: {
-              platform: "bilibili",
-              title: `[B站] ${title}`,
+              platform,
+              title: `[${platformLabel}] ${title}`,
               url,
               photo,
               encryption: false,
@@ -279,14 +421,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           success: true,
           code: 200,
-          message: "B站视频解析成功，已发送 MP4 下载直链"
+          message: `${platformLabel}视频解析成功，已发送 MP4 下载直链`
         });
       } catch (error) {
-        console.warn("⚠️ B站解析失败:", error);
+        console.warn(`⚠️ ${platformLabel}解析失败:`, error);
         sendResponse({
           success: false,
           code: 9015,
-          message: `⚠️ B站视频解析失败：${error.message || error}`
+          message: `⚠️ ${platformLabel}视频解析失败：${error.message || error}`
         });
       }
       return;
