@@ -1,6 +1,7 @@
-.DS_Store
-Thumbs.db
-desktop.ini
+参考/
+cache/
+data.db
+data.db-shm
+data.db-wal
 *.log
-.idea/
-.vscode/
+*.zip
