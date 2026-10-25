@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "视频号 · B站下载助手（免激活稳定版）",
-    "version": "1.2.1",
+    "version": "1.2.3",
     "description": "专注微信视频号（ISAAC-64解密回传MP4）与B站（直链提取），0弹窗免验证稳定运行",
     "author": "Learning Edition",
     "permissions": [

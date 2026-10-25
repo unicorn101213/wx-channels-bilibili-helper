@@ -143,13 +143,14 @@ class RandCtx64 {
 }
 
 function decryptData(data, encLen, tmpKey) {
-  if (data.length === 0 || data.length < encLen) {
+  const limit = Math.min(data.length, Number(encLen) || 0);
+  if (!limit) {
     return;
   }
 
   const aaInst = new RandCtx64(tmpKey);
 
-  for (let i = 0; i < encLen; i += 8) {
+  for (let i = 0; i < limit; i += 8) {
     const randNumber = aaInst.ISAacRandom();
     const tempNumber = new Array(8);
     for (let j = 0; j < 8; j++) {
@@ -158,7 +159,7 @@ function decryptData(data, encLen, tmpKey) {
 
     for (let j = 0; j < 8; j++) {
       const realIndex = i + j;
-      if (realIndex >= encLen) {
+      if (realIndex >= limit) {
         return;
       }
       data[realIndex] ^= tempNumber[j];

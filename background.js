@@ -142,6 +142,46 @@ async function resolveBilibiliVideo({ bvid, aid, shareUrl, title }) {
   };
 }
 
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "fetch-binary") {
+    return;
+  }
+
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || msg.type !== "start" || !msg.url) {
+      return;
+    }
+
+    try {
+      const targetUrl = String(msg.url).replace(/^http:\/\//i, "https://");
+      const res = await fetch(targetUrl, { signal: AbortSignal.timeout(180000) });
+      if (!res.ok || !res.body) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      port.postMessage({
+        type: "meta",
+        enclen: res.headers.get("X-enclen") || ""
+      });
+
+      const reader = res.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        port.postMessage({ type: "chunk", chunk: value });
+      }
+      port.postMessage({ type: "done" });
+    } catch (err) {
+      port.postMessage({
+        type: "error",
+        message: String(err?.message || err)
+      });
+    }
+  });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (!message || !message.action) {

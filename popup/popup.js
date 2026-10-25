@@ -59,9 +59,7 @@ async function localDownloadAndDecrypt(rawUrl, decodeKey, title) {
     try {
         const response = await fetch(cleanUrl, {
             method: "GET",
-            headers: {
-                Range: "bytes=0-"
-            }
+            signal: AbortSignal.timeout(180000)
         });
 
         if (!response.ok) {

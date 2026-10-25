@@ -159,9 +159,27 @@ async function sendFileToWeChat(uint8Data, filename, mimeType = 'video/mp4') {
         // 优先查找页面上的文件上传 input[type="file"]
         const fileInputs = document.querySelectorAll('input[type="file"]');
         if (fileInputs.length > 0) {
-            const fileInput = fileInputs[0];
+            const fileInput = document.querySelector('.chat-panel input[type="file"]') || fileInputs[fileInputs.length - 1];
+            const textInput = document.querySelector('textarea.chat-panel__input-container, textarea, [contenteditable="true"]');
+            if (textInput && 'value' in textInput) {
+                textInput.value = '';
+                textInput.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+
             fileInput.files = dataTransfer.files;
             fileInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+            fileInput.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+
+            // 选中文件后如果输入框还留着文件，说明页面在等发送键，补一次点击
+            await new Promise(resolve => setTimeout(resolve, 800));
+            if (fileInput.files && fileInput.files.length > 0) {
+                const sendButton = document.querySelector('.chat-send__button:not(.chat-send__button__disabled)')
+                    || document.querySelector('.chat-send__button');
+                if (sendButton && !sendButton.classList.contains('chat-send__button__disabled')) {
+                    sendButton.click();
+                }
+            }
+
             console.log('✅ 已通过 input[type="file"] 自动回传解密后的文件到微信传输助手:', filename);
             return true;
         }
@@ -316,6 +334,14 @@ class MessageQueue {
 // 创建全局消息队列实例
 const messageQueue = new MessageQueue();
 
+// 文字回发和文件回传必须排队，避免“请稍候”还在发送时就把文件塞进输入框
+let chatChain = Promise.resolve();
+function runInChatOrder(task) {
+    const run = chatChain.then(task, task);
+    chatChain = run.then(() => {}, () => {});
+    return run;
+}
+
 // 注入 hook 脚本
 injectScript('ajaxhook.min.js');
 
@@ -325,28 +351,30 @@ window.addEventListener('message', async (event) => {
 
     if (event.data.type === 'hook2content_getResponseText') {
         console.log('捕获视频号请求:', event.data);
-        sendMessageToWeChat("⚡ 已收到【视频号】作品，正在为您解析并自动解密回传 MP4...");
-        const res = await chrome.runtime.sendMessage({
-            action: 'content2back_downloadMP4',
-            data: event.data
+        runInChatOrder(async () => {
+            const res = await chrome.runtime.sendMessage({
+                action: 'content2back_downloadMP4',
+                data: event.data
+            });
+            if (res && !res.success) {
+                await sendMessageToWeChat(res.message);
+            }
         });
-        if (res && !res.success) {
-            sendMessageToWeChat(res.message);
-        }
     }
 
     if (event.data.type === 'hook2content_thirdPartyVideo') {
         const platformName = event.data.platform === 'bilibili' ? 'B站' : '抖音';
         console.log(`捕获${platformName}请求:`, event.data);
-        sendMessageToWeChat(`⚡ 已收到【${platformName}】视频分享，正在提取无水印 MP4 并回传对话框...`);
-        const res = await chrome.runtime.sendMessage({
-            action: 'content2back_thirdPartyVideo',
-            platform: event.data.platform,
-            data: event.data.data
+        runInChatOrder(async () => {
+            const res = await chrome.runtime.sendMessage({
+                action: 'content2back_thirdPartyVideo',
+                platform: event.data.platform,
+                data: event.data.data
+            });
+            if (res && !res.success) {
+                await sendMessageToWeChat(res.message);
+            }
         });
-        if (res && !res.success) {
-            sendMessageToWeChat(res.message);
-        }
     }
 
     if (event.data.type === 'hook2content_directMedia') {
@@ -365,25 +393,21 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const saveToLocalDisk = Boolean(request.saveToLocalDisk);
         console.log('📥 接收到解析结果:', responseData, '保存到本地硬盘:', saveToLocalDisk);
 
-        handleDownload(responseData, sendResponse, saveToLocalDisk);
+        runInChatOrder(() => handleDownload(responseData, sendResponse, saveToLocalDisk));
         return true; // 异步处理
     }
 
     if (request.action === 'back2content_postVideoInfo') {
-        const { title, photo, url, encryption } = request.data;
+        const { title, url, encryption } = request.data;
 
         console.log('📹 接收到视频信息，准备发送消息...');
 
-        // 如果视频是加密流，原始链接在手机端直接点开会黑屏，因此不再发送无用的长加密链接，而是直接回传解密后的 .mp4 视频文件
-        const videoLine = encryption
-            ? `\n\n【视频文件】：\n🔐 原始流已加密，正在本地解密并将可播放的 .mp4 文件直接发回此对话框，请稍候...`
-            : `\n\n【视频直链（可直接点击或复制下载）】：\n${url || '无'}`;
+        // 加密视频号不再把封面地址贴进对话。微信会把这种图片地址展开成一张图，看起来像在转圈，真正的 mp4 却还没发出来。
+        const message4 = encryption
+            ? `正在解密「${title || '未命名视频'}」，完成后会把可播放的 mp4 发到这里。`
+            : `🎬【视频标题】：\n${title || '未命名视频'}\n\n【视频直链（可直接点击或复制下载）】：\n${url || '无'}`;
 
-        const message4 = `🎬【视频标题】：\n${title || '未命名视频'}\n\n🖼️【封面链接】：\n${photo || '无'}${videoLine}`;
-
-        // 使用消息队列确保有序发送
-        messageQueue.setDelay(1000);
-        messageQueue.addBatch([message4]);
+        runInChatOrder(() => sendMessageToWeChat(message4));
         sendResponse({
             success: true,
             message: '已添加到消息队列'
@@ -444,6 +468,24 @@ async function handleDownload(responseData, sendResponse, saveToLocalDisk = fals
     }
 }
 
+const WECHAT_UPLOAD_LIMIT = 20 * 1024 * 1024;
+
+async function sendMp4BackOrHint(bytes, filename, saveToLocalDisk, alreadyPlain) {
+    if (saveToLocalDisk) {
+        downloadFile(bytes, filename);
+    }
+
+    const sizeMb = (bytes.byteLength / 1024 / 1024).toFixed(1);
+    if (bytes.byteLength > WECHAT_UPLOAD_LIMIT) {
+        await sendMessageToWeChat(`这个视频有 ${sizeMb} MB，超过网页版文件传输助手大约 20MB 的限制，没有发回对话框。请点浏览器右上角插件里这条记录的「解密下载」，直接保存到电脑。`);
+        return false;
+    }
+
+    const lead = alreadyPlain ? `视频有 ${sizeMb} MB` : `已解密 ${sizeMb} MB`;
+    await sendMessageToWeChat(`${lead}，正在把 mp4 发回对话框。`);
+    return sendFileToWeChat(bytes, filename, 'video/mp4');
+}
+
 function sanitizeContentFilename(title) {
     if (!title || typeof title !== 'string') {
         return '视频号视频';
@@ -451,59 +493,123 @@ function sanitizeContentFilename(title) {
     return title.replace(/[<>:"|?*\/\n\r\\]/g, '_').trim().slice(0, 80) || '视频号视频';
 }
 
+function isPlayableMp4(bytes) {
+    return bytes && bytes.length > 8
+        && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
+}
+
+function decryptUntilPlayable(bytes, enclenStr, decodeKey) {
+    if (isPlayableMp4(bytes)) {
+        return;
+    }
+
+    const headerLen = parseInt(enclenStr, 10);
+    const candidates = [];
+    if (headerLen > 0) candidates.push(headerLen);
+    candidates.push(131072);
+    candidates.push(bytes.length);
+
+    const tried = new Set();
+    for (const len of candidates) {
+        const n = Math.min(bytes.length, len);
+        if (!n || tried.has(n)) continue;
+        tried.add(n);
+        decryptData(bytes, n, String(decodeKey));
+        if (isPlayableMp4(bytes)) return;
+        decryptData(bytes, n, String(decodeKey));
+    }
+
+    throw new Error('解密后仍不是可播放的 MP4');
+}
+
+function fetchVideoBytesViaPort(url) {
+    return new Promise((resolve, reject) => {
+        const port = chrome.runtime.connect({ name: 'fetch-binary' });
+        const chunks = [];
+        let enclen = '';
+        let settled = false;
+
+        const finish = (fn) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try { port.disconnect(); } catch (e) {}
+            fn();
+        };
+
+        const timer = setTimeout(() => {
+            finish(() => reject(new Error('下载超时')));
+        }, 180000);
+
+        port.onDisconnect.addListener(() => {
+            if (!settled) {
+                finish(() => reject(new Error('下载中断')));
+            }
+        });
+
+        port.onMessage.addListener((msg) => {
+            if (msg.type === 'meta') {
+                enclen = msg.enclen || '';
+            } else if (msg.type === 'chunk' && msg.chunk) {
+                chunks.push(new Uint8Array(msg.chunk));
+            } else if (msg.type === 'done') {
+                const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                const bytes = new Uint8Array(total);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    bytes.set(chunk, offset);
+                    offset += chunk.length;
+                }
+                finish(() => resolve({ bytes, enclen }));
+            } else if (msg.type === 'error') {
+                finish(() => reject(new Error(msg.message || '后台下载失败')));
+            }
+        });
+
+        port.postMessage({ type: 'start', url });
+    });
+}
+
+async function fetchVideoBytes(url) {
+    const videoUrl = String(url || '').replace(/^http:\/\//i, 'https://');
+    try {
+        const response = await fetch(videoUrl, { method: 'GET', signal: AbortSignal.timeout(180000) });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        if (!bytes.length) {
+            throw new Error('视频内容为空');
+        }
+        return { bytes, enclen: response.headers.get('X-enclen') || '' };
+    } catch (err) {
+        console.warn('页面直接拉取失败，改由后台分段拉取', err);
+        const viaPort = await fetchVideoBytesViaPort(videoUrl);
+        if (!viaPort.bytes?.length) {
+            throw new Error(err?.message || '拉取视频流失败');
+        }
+        return viaPort;
+    }
+}
+
 // ============= 视频下载和解密函数 =============
 async function downloadAndDecryptVideo(url, decodeKey, isEncrypted, title, sendResponse, preFetchedBase64 = '', saveToLocalDisk = false) {
     try {
         console.log('⏳ 下载中...');
 
-        const videoUrl = String(url || '').replace(/^http:\/\//i, 'https://');
-
         let encryptedBuffer = null;
         let enclenStr = '';
 
-        // 如果已经在抖音同源标签页预拉取了二进制流（避免跨站 HTTP 403），直接解码还原为 Uint8Array
         if (preFetchedBase64) {
-            console.log('⚡ 使用同源预拉取的二进制视频流...');
             const binaryStr = atob(preFetchedBase64);
             encryptedBuffer = new Uint8Array(binaryStr.length);
             for (let i = 0; i < binaryStr.length; i++) {
                 encryptedBuffer[i] = binaryStr.charCodeAt(i);
             }
         } else {
-            try {
-                // 优先在 content script 直接拉取
-                const response = await fetch(videoUrl, {
-                    method: 'GET',
-                    headers: {
-                        'Range': 'bytes=0-'
-                    }
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
-
-                enclenStr = response.headers.get('X-enclen') || '';
-                const arrayBuffer = await response.arrayBuffer();
-                encryptedBuffer = new Uint8Array(arrayBuffer);
-            } catch (corsOrFetchErr) {
-                // 如果 B站 CDN 在微信网页端触发 CORS 拦截，切换到 background 特权拉取
-                console.log('🔄 切换至 background 跨域代拉取视频流...');
-                const bgRes = await chrome.runtime.sendMessage({
-                    action: 'content2back_fetchBinary',
-                    url: videoUrl,
-                    title: title || '视频'
-                });
-                if (!bgRes || !bgRes.success || !bgRes.base64) {
-                    throw new Error(bgRes?.message || corsOrFetchErr.message || '拉取视频流失败');
-                }
-                enclenStr = bgRes.enclen || '';
-                const binaryStr = atob(bgRes.base64);
-                encryptedBuffer = new Uint8Array(binaryStr.length);
-                for (let i = 0; i < binaryStr.length; i++) {
-                    encryptedBuffer[i] = binaryStr.charCodeAt(i);
-                }
-            }
+            const fetched = await fetchVideoBytes(url);
+            encryptedBuffer = fetched.bytes;
+            enclenStr = fetched.enclen || '';
         }
 
         console.log(`📦 下载完成，数据长度: ${encryptedBuffer.byteLength}`);
@@ -511,33 +617,23 @@ async function downloadAndDecryptVideo(url, decodeKey, isEncrypted, title, sendR
         const safeFilename = `${sanitizeContentFilename(title)}.mp4`;
 
         if (isEncrypted) {
-            // 需要解密
             console.log('⏳ 解密中...');
 
             try {
-                // 直接调用 decryptData 函数完成解密（默认兜底 131072）
-                const parsedEnclen = parseInt(enclenStr, 10);
-                const encryptLength = Math.min(encryptedBuffer.length, parsedEnclen > 0 ? parsedEnclen : 131072);
-                decryptData(encryptedBuffer, encryptLength, String(decodeKey));
-
+                decryptUntilPlayable(encryptedBuffer, enclenStr, decodeKey);
                 console.log('✅ 解密完成');
-                if (saveToLocalDisk) {
-                    downloadFile(encryptedBuffer, safeFilename);
-                }
-
-                // 自动将解密后的 .mp4 文件上传发回微信文件传输助手对话框（手机/电脑微信可直接点开播放或转发给好友）
-                const uploaded = await sendFileToWeChat(encryptedBuffer, safeFilename, 'video/mp4');
-                if (!uploaded && !saveToLocalDisk) {
-                    downloadFile(encryptedBuffer, safeFilename);
-                    sendMessageToWeChat(`✅ 视频已解密并保存到电脑【下载】目录：${safeFilename}`);
+                const uploaded = await sendMp4BackOrHint(encryptedBuffer, safeFilename, saveToLocalDisk, false);
+                if (!uploaded && encryptedBuffer.byteLength <= WECHAT_UPLOAD_LIMIT) {
+                    await sendMessageToWeChat(`解密失败：mp4 已解密，但没能发回对话框。可点插件里的「解密下载」。`);
                 }
 
                 sendResponse({
-                    success: true,
-                    message: '视频解密并回传成功'
+                    success: uploaded,
+                    message: uploaded ? '视频解密并回传成功' : '解密成功但回传失败'
                 });
             } catch (decryptError) {
                 console.warn('⚠️ 解密失败:', decryptError);
+                await sendMessageToWeChat(`解密失败：${decryptError.message}`);
                 sendResponse({
                     success: false,
                     message: '解密失败: ' + decryptError.message
@@ -547,10 +643,7 @@ async function downloadAndDecryptVideo(url, decodeKey, isEncrypted, title, sendR
         } else {
             // 无需解密（如 B站 / 抖音 / 未加密视频号），直接回传文件至微信对话框
             console.log('✅ 获取完成（无需解密）');
-            if (saveToLocalDisk) {
-                downloadFile(encryptedBuffer, safeFilename);
-            }
-            await sendFileToWeChat(encryptedBuffer, safeFilename, 'video/mp4');
+            await sendMp4BackOrHint(encryptedBuffer, safeFilename, saveToLocalDisk, true);
 
             sendResponse({
                 success: true,

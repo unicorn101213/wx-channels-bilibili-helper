@@ -245,6 +245,11 @@ ah.proxy({
                             msg.Content.includes('视频号下载助手') ||
                             msg.Content.includes('🎬【视频标题】') ||
                             msg.Content.includes('⚡ 已收到') ||
+                            msg.Content.includes('正在解密') ||
+                            msg.Content.includes('已解密') ||
+                            msg.Content.includes('解密失败') ||
+                            msg.Content.includes('没能发回') ||
+                            msg.Content.includes('20MB') ||
                             msg.Content.includes('✅ 视频已') ||
                             msg.Content.includes('✅ 图集 ZIP') ||
                             msg.Content.includes('⚠️ 自动下载') ||
